@@ -170,10 +170,23 @@ namespace FixVideoTimeLine
             }
         }
 
+        /// <summary>路径分隔符。刻意不用数组初始化列表（new char[]{...}）：本机工具链生成的 PE 中，
+        /// 值类型数组字面量会被放在 .text 节内、紧邻导入 thunk 的数据区，实测存在被加载器 IAT
+        /// 修正误写而损坏的情况。改为逐元素赋值构造，语义完全等价。</summary>
+        private static readonly char[] PathSeps = MakePathSeps();
+
+        private static char[] MakePathSeps()
+        {
+            char[] a = new char[2];
+            a[0] = '\\';
+            a[1] = '/';
+            return a;
+        }
+
         /// <summary>路径中是否含有输出子目录名（genpts）。</summary>
         public static bool IsUnderOutputDir(string fullPath)
         {
-            string[] parts = fullPath.Split(new char[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+            string[] parts = fullPath.Split(PathSeps, StringSplitOptions.RemoveEmptyEntries);
             for (int i = 0; i < parts.Length - 1; i++)
             {
                 if (string.Equals(parts[i], AppConfig.OutSubDir, StringComparison.OrdinalIgnoreCase))

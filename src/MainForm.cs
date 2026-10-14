@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace FixVideoTimeLine
@@ -16,15 +17,38 @@ namespace FixVideoTimeLine
         private Label _lblSubDesc, _lblOverDesc, _lblReplaceDesc;
         private Label _lblCount, _lblHint, _lblStatus, _lblFf;
         private ProgressBar _pgBar;
-        private TextBox _txtLog;
+        private ProgressBarSkin _pgSkin;
+        private RichTextBox _txtLog;
+
+        // ---- 字体 ----
+        private Font _uiFont;
+        private Font _logFont;
+        private Font _logFontBold;
+        private Font _summaryFont;
 
         // ---- 状态 ----
         private readonly List<string> _inputPaths = new List<string>();
         private List<string> _scanFiles = new List<string>();
         private string _lastOutput;
+        private string _lastOutputDir;   // 输出目录（弹窗只给目录，不罗列文件）
         private volatile bool _stopRequested;
         private volatile System.Diagnostics.Process _currentProcess;
         private bool _running;
+
+        // ---- 日志配色（GUI 面向最终用户；LOG 文件保留全量明细） ----
+        private static readonly Color CInfo = Color.FromArgb(0x2C, 0x2C, 0x2A);      // 普通信息
+        private static readonly Color CMuted = Color.FromArgb(0x5F, 0x5E, 0x5A);     // 次要信息
+        private static readonly Color CSep = Color.FromArgb(0x44, 0x44, 0x41);       // 文件分隔
+        private static readonly Color CTask = Color.FromArgb(0x1B, 0x4F, 0x8A);      // 任务开始
+        private static readonly Color COk = Color.FromArgb(0x0F, 0x6E, 0x56);        // 成功
+        private static readonly Color CDegraded = Color.FromArgb(0x85, 0x4F, 0x0B);  // 降级成功
+        private static readonly Color CSkip = Color.FromArgb(0x5F, 0x5E, 0x5A);      // 跳过
+        private static readonly Color CFail = Color.FromArgb(0xA3, 0x2D, 0x2D);      // 失败
+        private static readonly Color CStopped = Color.FromArgb(0x99, 0x35, 0x56);   // 已停止
+        private static readonly Color CWarn = Color.FromArgb(0x85, 0x4F, 0x0B);      // 警告
+        private static readonly Color CErrorBack = Color.FromArgb(0xA3, 0x2D, 0x2D); // 程序级错误底色
+        private static readonly Color CErrorFore = Color.White;
+        private static readonly Color CSumItem = Color.FromArgb(0x79, 0x1F, 0x1F);   // 汇总列表项
 
         public MainForm()
         {
@@ -32,18 +56,31 @@ namespace FixVideoTimeLine
 
             UpdateFfmpegLabel();
             AppendLog("提示：可直接把视频文件或文件夹拖入本窗口；在「② 输出」选择修复结果的存放方式。");
+            AppendMuted("本窗口只显示执行概要；完整明细见 log 目录下的日志文件。");
 
             Shown += delegate { CheckFfmpegOnStartup(); };
+            FormClosed += delegate
+            {
+                if (_pgSkin != null) _pgSkin.Dispose();
+                if (_logFontBold != null) _logFontBold.Dispose();
+                if (_summaryFont != null) _summaryFont.Dispose();
+                if (_logFont != null) _logFont.Dispose();
+                if (_uiFont != null) _uiFont.Dispose();
+            };
         }
 
         private void InitializeUi()
         {
             Text = AppConfig.AppName + "  v" + AppConfig.AppVer;
-            ClientSize = new Size(760, 736);
+            ClientSize = new Size(760, 752);
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
-            Font = new Font("Microsoft YaHei UI", 9f);
+            _uiFont = new Font("Microsoft YaHei UI", 9f);
+            _logFont = new Font("Consolas", 9f);
+            _logFontBold = new Font(_logFont, FontStyle.Bold);
+            _summaryFont = new Font("Microsoft YaHei UI", 11f, FontStyle.Bold);
+            Font = _uiFont;
             AllowDrop = true;
 
             // ---- ① 输入 ----
@@ -150,7 +187,7 @@ namespace FixVideoTimeLine
             var gb4 = new GroupBox();
             gb4.Text = "③ 执行";
             gb4.Location = new Point(12, 364);
-            gb4.Size = new Size(736, 110);
+            gb4.Size = new Size(736, 140);
             Controls.Add(gb4);
 
             _btnRun = MakeButton("开始修复", 14, 22, 130, 34);
@@ -174,32 +211,38 @@ namespace FixVideoTimeLine
             _lblStatus.ForeColor = Color.DimGray;
             gb4.Controls.Add(_lblStatus);
 
+            // 进度条加高到 45px，内部由 ProgressBarSkin 补画两行文字：
+            //   总进度：NN%
+            //   当前：文件名 (NN%)
             _pgBar = new ProgressBar();
-            _pgBar.Location = new Point(14, 80);
-            _pgBar.Size = new Size(708, 18);
+            _pgBar.Location = new Point(14, 78);
+            _pgBar.Size = new Size(708, 45);
             _pgBar.Minimum = 0;
             _pgBar.Maximum = 100;
             gb4.Controls.Add(_pgBar);
+            _pgSkin = new ProgressBarSkin(_pgBar, _logFont);
 
             // ---- 日志 ----
-            _txtLog = new TextBox();
-            _txtLog.Location = new Point(12, 482);
-            _txtLog.Size = new Size(736, 222);
-            _txtLog.Multiline = true;
+            _txtLog = new RichTextBox();
+            _txtLog.Location = new Point(12, 516);
+            _txtLog.Size = new Size(736, 188);
             _txtLog.ReadOnly = true;
-            _txtLog.ScrollBars = ScrollBars.Vertical;
+            _txtLog.WordWrap = false;                       // 配合 Both 提供横向滚动条
+            _txtLog.ScrollBars = RichTextBoxScrollBars.Both;
             _txtLog.BackColor = Color.White;
-            _txtLog.Font = new Font("Consolas", 9f);
+            _txtLog.Font = _logFont;
+            _txtLog.MaxLength = int.MaxValue;               // 不设上限，执行过程全量展示
+            _txtLog.DetectUrls = false;
             Controls.Add(_txtLog);
 
             // ---- 底部 ----
-            _btnFf = MakeButton("检测 / 下载 FFmpeg", 12, 708, 152, 26);
+            _btnFf = MakeButton("检测 / 下载 FFmpeg", 12, 716, 152, 26);
             _btnFf.Click += delegate { OnFetchFfmpeg(); };
             Controls.Add(_btnFf);
 
             _lblFf = new Label();
             _lblFf.Text = "FFmpeg：检测中...";
-            _lblFf.Location = new Point(172, 713);
+            _lblFf.Location = new Point(172, 721);
             _lblFf.Size = new Size(576, 20);
             _lblFf.AutoEllipsis = true;
             Controls.Add(_lblFf);
@@ -256,14 +299,115 @@ namespace FixVideoTimeLine
 
         // ---------------- 日志框 ----------------
 
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        private const int WM_VSCROLL = 0x0115;
+        private const int SB_BOTTOM = 7;
+
+        /// <summary>把 RichTextBox 滚到底部。RichTextBox 不会自动滚到底（TextBox 会），
+        /// 且每行用 ScrollToCaret 是 O(n²) 的性能杀手，故统一用 WM_VSCROLL(SB_BOTTOM)。</summary>
+        private static void ScrollToBottom(RichTextBox rtb)
+        {
+            try
+            {
+                if (rtb.IsHandleCreated) SendMessage(rtb.Handle, WM_VSCROLL, (IntPtr)SB_BOTTOM, IntPtr.Zero);
+            }
+            catch { }
+        }
+
+        /// <summary>普通信息（默认样式）。</summary>
         private void AppendLog(string text)
+        {
+            AppendLine(text, CInfo, _logFont);
+        }
+
+        private void AppendMuted(string text) { AppendLine(text, CMuted, _logFont); }
+        private void AppendWarn(string text) { AppendLine(text, CWarn, _logFont); }
+        private void AppendSeparator(string text) { AppendLine(text, CSep, _logFont); }
+        private void AppendTask(string text) { AppendLine(text, CTask, _logFont); }
+        private void AppendOk(string text) { AppendLine(text, COk, _logFont); }
+        private void AppendDegraded(string text) { AppendLine(text, CDegraded, _logFont); }
+        private void AppendSkip(string text) { AppendLine(text, CSkip, _logFont); }
+        private void AppendFail(string text) { AppendLine(text, CFail, _logFont); }
+        private void AppendStopped(string text) { AppendLine(text, CStopped, _logFont); }
+
+        /// <summary>程序级错误：白字红底加粗，视觉上显著区别于业务失败。</summary>
+        private void AppendError(string text)
         {
             Ui(delegate
             {
-                _txtLog.AppendText(text + "\r\n");
-                _txtLog.SelectionStart = _txtLog.TextLength;
-                _txtLog.ScrollToCaret();
+                RichTextBox rtb = _txtLog;
+                if (rtb == null) return;
+                rtb.SelectionStart = rtb.TextLength;
+                rtb.SelectionLength = 0;
+                rtb.SelectionColor = CErrorFore;
+                rtb.SelectionBackColor = CErrorBack;
+                rtb.SelectionFont = _logFontBold;
+                rtb.AppendText(text + "\r\n");
+                rtb.SelectionStart = rtb.TextLength;
+                rtb.SelectionLength = 0;
+                rtb.SelectionBackColor = rtb.BackColor;
+                rtb.SelectionColor = CInfo;
+                rtb.SelectionFont = _logFont;
+                ScrollToBottom(rtb);
             });
+        }
+
+        /// <summary>汇总标题：唯一放大加粗的内容。</summary>
+        private void AppendSummaryTitle(string text)
+        {
+            Ui(delegate
+            {
+                RichTextBox rtb = _txtLog;
+                if (rtb == null) return;
+                rtb.SelectionStart = rtb.TextLength;
+                rtb.SelectionLength = 0;
+                rtb.SelectionColor = CFail;
+                rtb.SelectionBackColor = rtb.BackColor;
+                rtb.SelectionFont = _summaryFont;
+                rtb.AppendText(text + "\r\n");
+                rtb.SelectionStart = rtb.TextLength;
+                rtb.SelectionLength = 0;
+                rtb.SelectionColor = CInfo;
+                rtb.SelectionFont = _logFont;
+                ScrollToBottom(rtb);
+            });
+        }
+
+        private void AppendSummaryItem(string text) { AppendLine(text, CSumItem, _logFont); }
+
+        private void AppendBlank()
+        {
+            AppendLine(string.Empty, CInfo, _logFont);
+        }
+
+        private void AppendLine(string text, Color color, Font font)
+        {
+            Ui(delegate { AppendLineCore(text, color, font); });
+        }
+
+        private void AppendLineCore(string text, Color color, Font font)
+        {
+            RichTextBox rtb = _txtLog;
+            if (rtb == null) return;
+            Font f = (font == null) ? _logFont : font;
+
+            rtb.SelectionStart = rtb.TextLength;
+            rtb.SelectionLength = 0;
+            rtb.SelectionColor = color;
+            rtb.SelectionBackColor = rtb.BackColor;
+            rtb.SelectionFont = f;
+            rtb.AppendText(text + "\r\n");
+
+            // 复位插入点样式，避免下一行继承本次颜色
+            rtb.SelectionStart = rtb.TextLength;
+            rtb.SelectionLength = 0;
+            rtb.SelectionColor = CInfo;
+            rtb.SelectionBackColor = rtb.BackColor;
+            rtb.SelectionFont = _logFont;
+
+            ScrollToBottom(rtb);
         }
 
         private void SetStatus(string text)
@@ -279,6 +423,18 @@ namespace FixVideoTimeLine
                 if (v < _pgBar.Minimum) v = _pgBar.Minimum;
                 if (v > _pgBar.Maximum) v = _pgBar.Maximum;
                 _pgBar.Value = v;
+            });
+        }
+
+        /// <summary>设置进度条内的两行文字；两参均为 null 表示清空。</summary>
+        private void SetProgressText(string line1, string line2)
+        {
+            ProgressBarSkin skin = _pgSkin;
+            if (skin == null) return;
+            Ui(delegate
+            {
+                if (line1 == null && line2 == null) skin.ClearText();
+                else skin.SetText(line1, line2);
             });
         }
 
@@ -364,6 +520,7 @@ namespace FixVideoTimeLine
             _lblCount.Text = "尚未选择";
             _lblCount.ForeColor = Color.DimGray;
             SetProgress(0);
+            SetProgressText(null, null);
             SetStatus("就绪");
             AppendLog("已清空选择。");
         }
@@ -415,11 +572,11 @@ namespace FixVideoTimeLine
 
         private void CheckFfmpegOnStartup()
         {
-            // 仅更新底部状态，不写文件日志，避免每次启动产生杂散日志。
+            // 仅更新界面提示，不写文件日志，避免每次启动产生杂散日志。
             string ff = FfmpegManager.Find();
             if (ff == null)
             {
-                AppendLog("FFmpeg 未检测到，将在首次修复时自动下载");
+                AppendWarn("FFmpeg 未检测到，将在首次修复时自动下载。");
             }
         }
 
@@ -463,14 +620,14 @@ namespace FixVideoTimeLine
                     Log.Open();
                     Log.Info("===== 手动获取 FFmpeg =====");
                     string got = FfmpegManager.Install(
-                        delegate(string m) { SetStatus(m); AppendLog(m); Log.Dl(m); },
+                        delegate(string m) { SetStatus(m); AppendMuted(m); Log.Dl(m); },
                         delegate { return _stopRequested; });
-                    AppendLog("FFmpeg 已安装：" + got);
-                    AppendLog("版本：" + FfmpegManager.Version(got));
+                    AppendOk("FFmpeg 已安装：" + got);
+                    AppendOk("版本：" + FfmpegManager.Version(got));
                 }
                 catch (Exception ex)
                 {
-                    AppendLog("[错误] " + ex.Message);
+                    AppendError("FFmpeg 获取失败：" + ex.Message);
                     Log.Err("FFmpeg 获取失败：" + ex.Message);
                     SetStatus("FFmpeg 获取失败");
                 }
@@ -498,14 +655,14 @@ namespace FixVideoTimeLine
             if (ff != null) return ff;
 
             Log.Warn("[FFmpeg 未检测到，开始自动下载]");
-            AppendLog("[FFmpeg 未检测到，开始自动下载]");
+            AppendWarn("FFmpeg 未检测到，开始自动下载（约 85 ~ 115 MB）...");
 
             ff = FfmpegManager.Install(
                 delegate(string m) { SetStatus(m); Log.Dl(m); },
                 delegate { return _stopRequested; });
 
             Log.Ok("[FFmpeg 已安装] " + ff);
-            AppendLog("[FFmpeg 已安装] " + ff);
+            AppendOk("FFmpeg 已就绪：" + ff);
             UpdateFfmpegLabel();
             return ff;
         }
@@ -582,7 +739,7 @@ namespace FixVideoTimeLine
 
             if (_stopRequested)
             {
-                AppendLog("[已停止] 扫描被用户中断。");
+                AppendStopped("已停止：扫描被用户中断。");
                 SetStatus("已停止扫描");
                 FinishRunUi();
                 return;
@@ -607,8 +764,8 @@ namespace FixVideoTimeLine
 
             if (skippedDirs > 0)
             {
-                AppendLog(string.Format(CultureInfo.InvariantCulture,
-                    "[提示] 有 {0} 个文件夹因无访问权限被跳过（不影响其余文件夹）。", skippedDirs));
+                AppendWarn(string.Format(CultureInfo.InvariantCulture,
+                    "提示：有 {0} 个文件夹因无访问权限被跳过（不影响其余文件夹）。", skippedDirs));
             }
             AppendLog(string.Format(CultureInfo.InvariantCulture, "扫描完成，共找到 {0} 个视频文件。", files.Count));
             _scanFiles = new List<string>(files);
@@ -634,78 +791,51 @@ namespace FixVideoTimeLine
             SetBusy(false);
         }
 
-        /// <summary>构造预览并在 UI 线程弹确认；返回是否继续。</summary>
+        /// <summary>构造预览并在 UI 线程弹确认；返回是否继续。
+        /// 弹窗正文由 DialogText 统一构造（只给汇总，不罗列文件清单）。</summary>
         private bool ConfirmRun(List<string> files, OutputMode mode)
         {
             bool overwrite = mode == OutputMode.Overwrite;
-
-            var preview = new List<string>();
-            int pv = Math.Min(6, files.Count);
-            for (int i = 0; i < pv; i++)
-            {
-                if (overwrite)
-                {
-                    preview.Add("  " + files[i] + "  ->  覆盖（同名同位置替换）");
-                }
-                else
-                {
-                    string target = OutputPlanner.FinalPath(files[i], mode);
-                    preview.Add("  " + files[i] + "  ->  " + target);
-                }
-            }
-            string previewText = string.Join("\r\n", preview.ToArray());
-            if (files.Count > 6)
-                previewText += string.Format(CultureInfo.InvariantCulture, "\r\n  ...（其余 {0} 个同理）", files.Count - 6);
 
             bool ok = false;
             Ui(delegate
             {
                 if (overwrite)
                 {
-                    string warn1 = string.Format(CultureInfo.InvariantCulture,
-                        "即将处理 {0} 个视频，输出方式：覆盖原文件。\r\n\r\n{1}\r\n\r\n" +
-                        "【警告】修复成功后会用结果直接替换原文件，文件名与位置不变，此操作不可恢复！\r\n" +
-                        "程序会先写临时文件、确认修复成功后才替换；失败或停止时原文件不动。\r\n\r\n确定要覆盖原文件吗？",
-                        files.Count, previewText);
-                    DialogResult a1 = MessageBox.Show(this, warn1, AppConfig.AppName + " — 危险操作确认",
+                    DialogResult a1 = MessageBox.Show(this, DialogText.ConfirmOverwrite(files, mode),
+                        AppConfig.AppName + " — 危险操作确认",
                         MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
                     if (a1 != DialogResult.Yes) { ok = false; return; }
 
-                    string warn2 = string.Format(CultureInfo.InvariantCulture,
-                        "请再次确认：将直接覆盖 {0} 个原视频文件，覆盖后无法找回原文件。\r\n建议重要文件先自行备份。\r\n\r\n真的要继续吗？",
-                        files.Count);
-                    DialogResult a2 = MessageBox.Show(this, warn2, AppConfig.AppName + " — 再次确认",
+                    DialogResult a2 = MessageBox.Show(this, DialogText.ConfirmSecond(files.Count),
+                        AppConfig.AppName + " — 再次确认",
                         MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
                     ok = (a2 == DialogResult.Yes);
                 }
                 else
                 {
-                    string modeText = mode == OutputMode.SameDirectory
-                        ? "与源文件同目录（文件名加 _genpts）"
-                        : "输出到 genpts 子目录";
-                    string ask = string.Format(CultureInfo.InvariantCulture,
-                        "即将处理 {0} 个视频，输出方式：{1}\r\n\r\n{2}\r\n\r\n源文件不会被修改。是否开始？",
-                        files.Count, modeText, previewText);
-                    DialogResult ans = MessageBox.Show(this, ask, AppConfig.AppName,
-                        MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                    DialogResult ans = MessageBox.Show(this, DialogText.ConfirmRun(files, mode),
+                        AppConfig.AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                     ok = (ans == DialogResult.Yes);
                 }
             });
             return ok;
         }
 
-        /// <summary>切换扫描阶段的界面：滚动进度条 + 状态文字。</summary>
+        /// <summary>切换扫描阶段的界面：滚动进度条 + 状态文字（扫描期进度条内不显示文字）。</summary>
         private void SetScanUi(bool scanning, string status)
         {
             Ui(delegate
             {
+                // Marquee 动画会持续重绘，补画文字会被盖住，因此扫描期一律清空
+                if (_pgSkin != null) _pgSkin.ClearText();
                 _pgBar.Style = scanning ? ProgressBarStyle.Marquee : ProgressBarStyle.Blocks;
                 if (!scanning) _pgBar.Value = 0;
                 if (!string.IsNullOrEmpty(status)) _lblStatus.Text = status;
             });
         }
 
-        /// <summary>真正的修复流程（后台线程）。所有 UI 访问必须经由 Ui()/AppendLog()/SetStatus()。</summary>
+        /// <summary>真正的修复流程（后台线程）。所有 UI 访问必须经由 Ui()/日志助手/SetStatus()。</summary>
         private void RunFixWorker(List<string> files, bool skipExists, OutputMode mode)
         {
             bool overwrite = mode == OutputMode.Overwrite;
@@ -722,10 +852,20 @@ namespace FixVideoTimeLine
             Log.Info(string.Format(CultureInfo.InvariantCulture,
                 "待处理 {0} 个视频　输出方式：{1}　跳过已存在：{2}　修复策略：先增强，失败自动降级基础",
                 files.Count, modeLabel, skipExists));
-            AppendLog("[日志文件] " + Log.FilePath);
+            // 完整清单只写日志文件（弹窗不罗列，避免长列表挤掉结论文字）
+            for (int i = 0; i < files.Count; i++)
+            {
+                string dst;
+                try { dst = OutputPlanner.FinalPath(files[i], mode); }
+                catch { dst = "(无法计算)"; }
+                Log.Info(string.Format(CultureInfo.InvariantCulture,
+                    "  [{0}/{1}] {2}  ->  {3}", i + 1, files.Count, files[i], dst));
+            }
+            AppendMuted("日志文件：" + Log.FilePath);
             AppendLog("输出方式：" + modeLabel);
 
-            int okCount = 0, failCount = 0, skipCount = 0, degradedCount = 0;
+            int okCount = 0, failCount = 0, skipCount = 0, degradedCount = 0, spaceSkipCount = 0;
+            var failStats = new Dictionary<string, List<FailureKind>>(StringComparer.OrdinalIgnoreCase);
 
             try
             {
@@ -733,36 +873,60 @@ namespace FixVideoTimeLine
                 Log.Info("FFmpeg：" + ff);
                 string ffVer = FfmpegManager.Version(ff);
                 Log.Info("FFmpeg 版本：" + ffVer);
-                AppendLog("[FFmpeg] " + ff);
+                AppendMuted("FFmpeg：" + ff);
 
                 for (int idx = 0; idx < files.Count; idx++)
                 {
                     if (_stopRequested) break;
 
                     string file = files[idx];
+                    string name = Path.GetFileName(file);
                     string tag = string.Format(CultureInfo.InvariantCulture, "[{0}/{1}]", idx + 1, files.Count);
                     string finalPath = OutputPlanner.FinalPath(file, mode);
-                    // 覆盖模式：finalPath 即源文件本身，ffmpeg 实际写同目录临时工作文件，成功后再替换
+                    // 覆盖模式：finalPath 即源文件本身，ffmpeg 实际写 temp 下的临时工作文件，成功后再替换
                     string workFile = OutputPlanner.WorkingPath(file, mode);
 
                     Log.Step(string.Format(CultureInfo.InvariantCulture, "{0} 处理：{1}", tag, file));
-                    AppendLog("");
-                    AppendLog(string.Format(CultureInfo.InvariantCulture, "──── {0} {1} ────", tag, Path.GetFileName(file)));
+                    AppendSeparator(string.Format(CultureInfo.InvariantCulture, "──── {0} {1} ────", tag, name));
 
                     // 非覆盖模式下工作文件不应等于源文件（genpts 子目录 / 主名加 _genpts），保险再拦一次
                     if (!overwrite && string.Equals(workFile, file, StringComparison.OrdinalIgnoreCase))
                     {
                         Log.Err("输出路径与源文件相同，已跳过");
-                        AppendLog("[跳过] 输出路径与源文件相同");
+                        AppendFail(string.Format(CultureInfo.InvariantCulture,
+                            "{0} {1} 跳过：输出路径与源文件相同", tag, name));
+                        RecordFail(failStats, file, FailureKind.Other);
                         failCount++;
                         continue;
                     }
                     if (skipExists && File.Exists(finalPath))
                     {
                         Log.Warn("输出已存在，跳过：" + finalPath);
-                        AppendLog("[跳过] 输出已存在：" + finalPath);
+                        AppendSkip(string.Format(CultureInfo.InvariantCulture,
+                            "{0} {1} 跳过：输出已存在", tag, name));
                         skipCount++;
                         continue;
+                    }
+
+                    // 磁盘空间预检：目标卷放不下就跳过本条、继续后续任务（不计失败）
+                    long needBytes = 0;
+                    try { needBytes = new FileInfo(file).Length; } catch { }
+                    if (needBytes > 0)
+                    {
+                        // 覆盖模式：临时文件写在运行目录，最终落回源文件所在卷，两块盘都要够
+                        string targetForSpace = overwrite ? AppConfig.Root : finalPath;
+                        long freeBytes = SpaceGuard.FreeBytes(targetForSpace);
+                        if (!SpaceGuard.HasRoom(targetForSpace, needBytes))
+                        {
+                            string freeText = FormatSize(freeBytes);
+                            Log.Warn(string.Format(CultureInfo.InvariantCulture,
+                                "{0} 磁盘空间不足，跳过：需要约 {1}，可用 {2}", tag, FormatSize(needBytes), freeText));
+                            AppendSkip(string.Format(CultureInfo.InvariantCulture,
+                                "{0} {1} 跳过：磁盘空间不足（需要约 {2}，可用 {3}）",
+                                tag, name, FormatSize(needBytes), freeText));
+                            spaceSkipCount++;
+                            continue;
+                        }
                     }
 
                     Log.Info("输入：" + file);
@@ -770,32 +934,47 @@ namespace FixVideoTimeLine
                     {
                         Log.Info("临时输出：" + workFile);
                         Log.Info("成功后替换：" + finalPath);
-                        AppendLog("临时文件：" + workFile);
+                        AppendMuted("临时文件：" + workFile);
                     }
                     else
                     {
                         Log.Info("输出：" + finalPath);
-                        AppendLog("输出：" + finalPath);
+                        AppendMuted("输出：" + finalPath);
                     }
+
+                    int overall = (int)((long)idx * 100 / files.Count);
                     SetStatus(string.Format(CultureInfo.InvariantCulture, "修复中 {0}...", tag));
                     SetProgress(0);
+                    AppendTask(string.Format(CultureInfo.InvariantCulture, "{0} {1} 修复中..", tag, name));
+                    SetProgressText(
+                        string.Format(CultureInfo.InvariantCulture, "总进度：{0}%", overall),
+                        string.Format(CultureInfo.InvariantCulture, "当前：{0} (0%)", name));
 
+                    int lastPct = -1;
                     var result = FixEngine.FixOne(
                         ff, file, workFile,
+                        // ffmpeg 原始输出**不再进 GUI**（受众是开发者/管理员），只写文件日志
                         delegate(string line)
                         {
-                            if (FixEngine.IsProgressLine(line)) return;
-                            string t = line.Trim();
-                            if (t.Length != 0)
+                            if (line == null) return;
+                            Log.Ff("    " + line);
+                        },
+                        delegate(int p)
+                        {
+                            SetProgress(p);
+                            if (p != lastPct)
                             {
-                                AppendLog("  " + t);
-                                Log.Ff("    " + t);
+                                lastPct = p;
+                                SetProgressText(
+                                    string.Format(CultureInfo.InvariantCulture, "总进度：{0}%", overall),
+                                    string.Format(CultureInfo.InvariantCulture, "当前：{0} ({1}%)", name, p));
                             }
                         },
-                        delegate(int p) { SetProgress(p); },
-                        delegate(string m) { AppendLog("  " + m); },
+                        delegate(string m) { Log.Info("  " + m); AppendMuted("  " + m); },
                         delegate { return _stopRequested; },
                         delegate(System.Diagnostics.Process p) { _currentProcess = p; });
+
+                    SetProgressText(null, null);
 
                     if (result.ExitCode == 0)
                     {
@@ -813,8 +992,10 @@ namespace FixVideoTimeLine
                                 // 走到这里源文件一定还在（File.Replace 未发生，或兜底已还原备份）。
                                 // 保留临时文件以便排查 / 手动恢复，不自动删除。
                                 Log.Err("替换原文件失败：" + cex.Message);
-                                AppendLog("[失败] 修复已完成，但替换原文件失败：" + cex.Message);
-                                AppendLog("源文件未改动；修复结果临时文件保留在：" + workFile);
+                                AppendFail(string.Format(CultureInfo.InvariantCulture,
+                                    "{0} {1} 修复失败：修复已完成但替换原文件失败（{2}）", tag, name, cex.Message));
+                                AppendMuted("  源文件未改动；修复结果临时文件保留在：" + workFile);
+                                RecordFail(failStats, file, FailureClassifier.Classify(result.Lines, result.ExitCode));
                                 failCount++;
                                 SetProgress(0);
                                 continue;
@@ -830,21 +1011,23 @@ namespace FixVideoTimeLine
                         try { mb = Math.Round(new FileInfo(donePath).Length / 1048576.0, 1); }
                         catch { }
                         _lastOutput = donePath;
+                        try { _lastOutputDir = Path.GetDirectoryName(donePath); }
+                        catch { _lastOutputDir = null; }
 
                         if (result.Degraded)
                         {
                             degradedCount++;
                             Log.Warn(string.Format(CultureInfo.InvariantCulture, "[成功·已降级] {0}（{1} MB）", donePath, mb));
-                            AppendLog(string.Format(CultureInfo.InvariantCulture,
-                                "[成功·增强模式失败已降级基础] {0}（{1} MB）{2}",
-                                donePath, mb, overwrite ? "，原文件已被替换" : ""));
+                            AppendDegraded(string.Format(CultureInfo.InvariantCulture,
+                                "{0} {1} 已降级完成（{2} MB）{3}",
+                                tag, name, mb, overwrite ? "，原文件已被替换" : ""));
                         }
                         else
                         {
                             Log.Ok(string.Format(CultureInfo.InvariantCulture, "[成功] {0}（{1} MB）", donePath, mb));
-                            AppendLog(string.Format(CultureInfo.InvariantCulture,
-                                "[成功] {0}（{1} MB）{2}",
-                                donePath, mb, overwrite ? "，原文件已被覆盖" : ""));
+                            AppendOk(string.Format(CultureInfo.InvariantCulture,
+                                "{0} {1} 修复完成（{2} MB）{3}",
+                                tag, name, mb, overwrite ? "，原文件已覆盖" : ""));
                         }
                         okCount++;
                         SetProgress(100);
@@ -853,55 +1036,80 @@ namespace FixVideoTimeLine
                     {
                         if (overwrite) OutputPlanner.DiscardWorking(workFile, finalPath, mode);
                         Log.Warn("当前文件处理被用户停止。");
-                        AppendLog("[已停止] 当前文件处理被中断，不计入失败，源文件未改动。");
+                        AppendStopped(string.Format(CultureInfo.InvariantCulture,
+                            "{0} {1} 已停止：处理被中断，不计入失败，源文件未改动", tag, name));
                         SetProgress(0);
                         break;
                     }
                     else
                     {
                         if (overwrite) OutputPlanner.DiscardWorking(workFile, finalPath, mode);
-                        Log.Err(string.Format(CultureInfo.InvariantCulture, "[失败] 增强与基础模式均失败，退出码 {0}", result.ExitCode));
-                        AppendLog(string.Format(CultureInfo.InvariantCulture, "[失败] 增强与基础模式均失败，FFmpeg 退出码 {0}，源文件未改动", result.ExitCode));
+                        FailureKind kind = FailureClassifier.Classify(result.Lines, result.ExitCode);
+                        string reason = FailureClassifier.Describe(kind);
+                        Log.Err(string.Format(CultureInfo.InvariantCulture,
+                            "[失败] 增强与基础模式均失败，退出码 {0}，原因：{1}（{2}）",
+                            result.ExitCode, reason, kind.ToString()));
+                        AppendFail(string.Format(CultureInfo.InvariantCulture,
+                            "{0} {1} 修复失败：{2}（源文件未改动）", tag, name, reason));
+
+                        // 详细 stderr 只进文件日志；GUI 仅在汇总里给条数
                         string[] lastLines = FixEngine.Tail(result.Lines, 10);
                         for (int i = 0; i < lastLines.Length; i++)
                         {
                             Log.FfErr("    " + lastLines[i]);
-                            AppendLog("    " + lastLines[i]);
                         }
-                        AppendLog("[建议] 若源为 RMVB/AVI/WMV 等容器，可能目标容器不支持其编码。");
+                        RecordFail(failStats, file, kind);
                         failCount++;
                         SetProgress(0);
                     }
                 }
 
+                ReportFailures(failStats);
+
+                // 结束汇总必须写进「执行过程展示框」——最终用户只看这个框，
+                // 状态栏那行字只是附属提示，不能作为唯一出口。
+                int skippedTotal = skipCount + spaceSkipCount;
+                int pending = Math.Max(0, files.Count - okCount - failCount - skippedTotal);
+                string[] sumLines = DialogText.SummaryLines(okCount, failCount, skippedTotal,
+                    degradedCount, spaceSkipCount, _stopRequested, pending);
+                AppendBlank();
+                for (int i = 0; i < sumLines.Length; i++)
+                {
+                    if (i == 0) AppendSummaryTitle(sumLines[i]);
+                    else AppendSummaryItem(sumLines[i]);
+                }
+
                 if (_stopRequested)
                 {
                     SetStatus(string.Format(CultureInfo.InvariantCulture,
-                        "已停止：成功 {0} · 失败 {1} · 跳过 {2}", okCount, failCount, skipCount));
+                        "已停止：成功 {0} · 失败 {1} · 跳过 {2}", okCount, failCount, skippedTotal));
                     Log.Warn(string.Format(CultureInfo.InvariantCulture,
-                        "===== 用户停止：成功 {0} · 失败 {1} · 跳过 {2} =====", okCount, failCount, skipCount));
-                    AppendLog("[已停止] 处理被用户中断。");
+                        "===== 用户停止：成功 {0} · 失败 {1} · 跳过 {2}（其中空间不足 {3}） =====",
+                        okCount, failCount, skipCount, spaceSkipCount));
+                    AppendStopped("已停止：处理被用户中断。");
                 }
                 else
                 {
                     SetStatus(string.Format(CultureInfo.InvariantCulture,
-                        "完成：成功 {0} · 失败 {1} · 跳过 {2}", okCount, failCount, skipCount));
+                        "完成：成功 {0} · 失败 {1} · 跳过 {2}", okCount, failCount, skippedTotal));
                     Log.Info(string.Format(CultureInfo.InvariantCulture,
-                        "===== 处理结束：成功 {0} · 失败 {1} · 跳过 {2} · 其中降级成功 {3} =====",
-                        okCount, failCount, skipCount, degradedCount));
+                        "===== 处理结束：成功 {0} · 失败 {1} · 跳过 {2} · 其中降级成功 {3} · 空间不足跳过 {4} =====",
+                        okCount, failCount, skipCount, degradedCount, spaceSkipCount));
 
-                    ShowSummary(okCount, failCount, skipCount, degradedCount);
+                    ShowSummary(okCount, failCount, skippedTotal, degradedCount, spaceSkipCount, failStats);
                 }
             }
             catch (Exception ex)
             {
                 Log.Err("[错误] " + ex.Message);
-                AppendLog("[错误] " + ex.Message);
+                Log.Err(ex.ToString());
+                AppendError("程序错误：" + ex.Message);
                 SetStatus("出错");
                 UiMessage(ex.Message, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
+                SetProgressText(null, null);
                 // 整个队列处理完毕（正常结束 / 用户停止 / 出错）后，一次性清理 temp：
                 // 删除残留临时文件并自底向上删空目录，直到 temp 根本身。
                 try { OutputPlanner.CleanupTempRoot(); } catch { }
@@ -912,27 +1120,111 @@ namespace FixVideoTimeLine
             }
         }
 
-        private void ShowSummary(int okCount, int failCount, int skipCount, int degradedCount)
+        // ---------------- 失败汇总 ----------------
+
+        /// <summary>记录一次失败（同一文件重复失败只记第一次原因）。</summary>
+        private static void RecordFail(Dictionary<string, List<FailureKind>> stats, string file, FailureKind kind)
         {
+            if (stats == null || string.IsNullOrEmpty(file)) return;
+            List<FailureKind> list;
+            if (!stats.TryGetValue(file, out list))
+            {
+                list = new List<FailureKind>();
+                stats[file] = list;
+            }
+            list.Add(kind);
+        }
+
+        /// <summary>按原因分组输出失败汇总：LOG 文件给完整文件列表，GUI 只给条数。</summary>
+        private void ReportFailures(Dictionary<string, List<FailureKind>> failStats)
+        {
+            if (failStats == null || failStats.Count == 0) return;
+
+            var byKind = new Dictionary<FailureKind, List<string>>();
+            foreach (KeyValuePair<string, List<FailureKind>> kv in failStats)
+            {
+                FailureKind k = (kv.Value != null && kv.Value.Count > 0) ? kv.Value[0] : FailureKind.Other;
+                List<string> list;
+                if (!byKind.TryGetValue(k, out list))
+                {
+                    list = new List<string>();
+                    byKind[k] = list;
+                }
+                list.Add(kv.Key);
+            }
+
+            FailureKind[] order = FailureClassifier.AllKinds();
+
+            // ---- LOG 文件：完整明细，按原因分组逐条列出 ----
+            Log.Err(string.Format(CultureInfo.InvariantCulture,
+                "===== 失败汇总：共 {0} 个文件 =====", failStats.Count));
+            for (int i = 0; i < order.Length; i++)
+            {
+                List<string> list;
+                if (!byKind.TryGetValue(order[i], out list)) continue;
+                Log.Err(string.Format(CultureInfo.InvariantCulture,
+                    "  因{0}失败 {1} 个：", FailureClassifier.Describe(order[i]), list.Count));
+                for (int j = 0; j < list.Count; j++) Log.Err("    " + list[j]);
+            }
+
+            // ---- GUI：只给条数 ----
+            AppendBlank();
+            AppendSummaryTitle(string.Format(CultureInfo.InvariantCulture,
+                "失败汇总：共 {0} 个文件失败", failStats.Count));
+            for (int i = 0; i < order.Length; i++)
+            {
+                List<string> list;
+                if (!byKind.TryGetValue(order[i], out list)) continue;
+                AppendSummaryItem(string.Format(CultureInfo.InvariantCulture,
+                    "    因{0}失败 {1} 个", FailureClassifier.Describe(order[i]), list.Count));
+            }
+            AppendSummaryItem("    详细文件列表见日志文件。");
+        }
+
+        private void ShowSummary(int okCount, int failCount, int skipCount, int degradedCount,
+            int spaceSkipCount, Dictionary<string, List<FailureKind>> failStats)
+        {
+            var extra = new List<string>();
+            if (degradedCount > 0)
+                extra.Add(string.Format(CultureInfo.InvariantCulture, "其中 {0} 个为增强失败后降级完成", degradedCount));
+            if (spaceSkipCount > 0)
+                extra.Add(string.Format(CultureInfo.InvariantCulture, "跳过中有 {0} 个因磁盘空间不足", spaceSkipCount));
+
+            string head = string.Format(CultureInfo.InvariantCulture,
+                "处理结束：成功 {0} · 失败 {1} · 跳过 {2}。", okCount, failCount, skipCount);
+            if (extra.Count > 0) head += "\r\n" + string.Join("\r\n", extra.ToArray());
+
             if (failCount == 0)
             {
-                string msg = string.Format(CultureInfo.InvariantCulture, "处理完成：成功 {0} 个。", okCount);
-                if (degradedCount > 0)
-                    msg += string.Format(CultureInfo.InvariantCulture, "（其中 {0} 个为增强失败后降级完成）", degradedCount);
-                if (skipCount > 0)
-                    msg += string.Format(CultureInfo.InvariantCulture, "跳过 {0} 个。", skipCount);
-                if (!string.IsNullOrEmpty(_lastOutput))
-                    msg += "\r\n\r\n最近输出：\r\n" + _lastOutput;
-                msg += "\r\n\r\n日志：\r\n" + Log.FilePath;
-                UiMessage(msg, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                UiMessage(DialogText.SummaryOk(okCount, degradedCount, skipCount, _lastOutputDir, Log.FilePath),
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else
             {
-                UiMessage(string.Format(CultureInfo.InvariantCulture,
-                    "处理结束：成功 {0} · 失败 {1} · 跳过 {2}。\r\n详情见下方日志与日志文件。",
-                    okCount, failCount, skipCount),
+                // 按原因分组的条数（不罗列文件）
+                var byKind = new Dictionary<FailureKind, int>();
+                if (failStats != null)
+                {
+                    foreach (KeyValuePair<string, List<FailureKind>> kv in failStats)
+                    {
+                        FailureKind k = (kv.Value != null && kv.Value.Count > 0) ? kv.Value[0] : FailureKind.Other;
+                        int c;
+                        byKind.TryGetValue(k, out c);
+                        byKind[k] = c + 1;
+                    }
+                }
+                UiMessage(DialogText.SummaryFail(head, byKind, Log.FilePath),
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
+        }
+
+        private static string FormatSize(long bytes)
+        {
+            if (bytes < 0) return "未知";
+            double mb = bytes / 1048576.0;
+            if (mb >= 1024.0)
+                return (mb / 1024.0).ToString("N2", CultureInfo.InvariantCulture) + " GB";
+            return mb.ToString("N1", CultureInfo.InvariantCulture) + " MB";
         }
 
         private void OnCancel()
@@ -943,7 +1235,7 @@ namespace FixVideoTimeLine
             {
                 try { p.Kill(); } catch { }
             }
-            AppendLog("[已发送停止指令]");
+            AppendStopped("已发送停止指令。");
         }
 
         private void OnOpenOutput()
@@ -974,7 +1266,7 @@ namespace FixVideoTimeLine
             if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
             {
                 try { System.Diagnostics.Process.Start("explorer.exe", "\"" + dir + "\""); }
-                catch (Exception ex) { AppendLog("[错误] 打开目录失败：" + ex.Message); }
+                catch (Exception ex) { AppendError("打开目录失败：" + ex.Message); }
             }
             else
             {

@@ -22,7 +22,7 @@ namespace FixVideoTimeLine
     internal static class AppConfig
     {
         public const string AppName = "修复视频时间轴";
-        public const string AppVer = "2.7";
+        public const string AppVer = "2.9";
 
         /// <summary>输出子目录名：&lt;源目录&gt;\genpts\&lt;原文件名&gt;</summary>
         public const string OutSubDir = "genpts";
@@ -30,7 +30,7 @@ namespace FixVideoTimeLine
         /// <summary>同目录输出时追加到主文件名的后缀：a.mp4 -&gt; a_genpts.mp4。</summary>
         public const string OutFileSuffix = "_genpts";
 
-        /// <summary>覆盖模式临时文件标记：&lt;主名&gt;.__genpts_tmp_&lt;8位&gt;.&lt;扩展名&gt;。</summary>
+        /// <summary>覆盖模式临时文件标记（历史版本命名，仅用于识别旧残留）。</summary>
         public const string WorkingMark = ".__genpts_tmp_";
 
         /// <summary>临时文件统一根目录名（位于运行目录下）：&lt;运行目录&gt;\temp\。</summary>

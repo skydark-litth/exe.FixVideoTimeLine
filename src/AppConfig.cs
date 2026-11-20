@@ -22,7 +22,7 @@ namespace FixVideoTimeLine
     internal static class AppConfig
     {
         public const string AppName = "修复视频时间轴";
-        public const string AppVer = "2.9";
+        public const string AppVer = "2.11";
 
         /// <summary>输出子目录名：&lt;源目录&gt;\genpts\&lt;原文件名&gt;</summary>
         public const string OutSubDir = "genpts";

@@ -492,23 +492,73 @@ namespace FixVideoTimeLine
 
         // ---------------- 输入 ----------------
 
-        private void OnPickFiles()
+        /// <summary>按扩展名生成文件对话框的筛选串：「视频文件|*.mp4;*.mkv;…|所有文件|*.*」。</summary>
+        private static string VideoFilter()
         {
             var exts = new List<string>();
             for (int i = 0; i < AppConfig.VideoExt.Length; i++) exts.Add("*" + AppConfig.VideoExt[i]);
-            string filter = "视频文件|" + string.Join(";", exts.ToArray()) + "|所有文件|*.*";
-            string[] files = NativeDialog.PickFiles("选择要修复的视频文件（可多选）", filter, null, Handle);
-            if (files != null) ApplyInput(new List<string>(files));
+            return "视频文件|" + string.Join(";", exts.ToArray()) + "|所有文件|*.*";
+        }
+
+        private void OnPickFiles()
+        {
+            try
+            {
+                using (var dlg = new OpenFileDialog())
+                {
+                    // .NET Framework 4.8 的 OpenFileDialog 在 Vista 及以上默认就是现代样式
+                    // （AutoUpgradeEnabled 默认 true），外观与文件夹选择框一致。
+                    dlg.Title = "选择要修复的视频文件（可多选）";
+                    dlg.Filter = VideoFilter();
+                    dlg.Multiselect = true;
+                    dlg.CheckFileExists = true;
+                    dlg.CheckPathExists = true;
+                    dlg.RestoreDirectory = true;
+
+                    if (dlg.ShowDialog(this) != DialogResult.OK) return;
+
+                    string[] files = dlg.FileNames;
+                    if (files == null || files.Length == 0)
+                    {
+                        // 不再静默失败：拿不到文件就在展示框里说一句，避免"点了没反应"
+                        AppendWarn("未取得所选文件，请重新选择。");
+                        return;
+                    }
+                    ApplyInput(new List<string>(files));
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendError("打开文件选择框失败：" + ex.Message);
+                UiMessage("打开文件选择框失败：\r\n" + ex.Message, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
         private void OnPickDir()
         {
-            string dir = NativeDialog.PickFolder("选择包含待修复视频的文件夹", null, Handle);
-            if (!string.IsNullOrEmpty(dir))
+            string dir;
+            try
+            {
+                dir = NativeDialog.PickFolder("选择包含待修复视频的文件夹", null, Handle);
+            }
+            catch (Exception ex)
+            {
+                AppendError("打开文件夹选择框失败：" + ex.Message);
+                UiMessage("打开文件夹选择框失败：\r\n" + ex.Message, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            if (string.IsNullOrEmpty(dir)) return;   // 用户取消
+
+            try
             {
                 var list = new List<string>();
                 list.Add(dir);
                 ApplyInput(list);
+            }
+            catch (Exception ex)
+            {
+                AppendError("读取所选文件夹失败：" + ex.Message);
+                UiMessage("读取所选文件夹失败：\r\n" + ex.Message, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -852,15 +902,8 @@ namespace FixVideoTimeLine
             Log.Info(string.Format(CultureInfo.InvariantCulture,
                 "待处理 {0} 个视频　输出方式：{1}　跳过已存在：{2}　修复策略：先增强，失败自动降级基础",
                 files.Count, modeLabel, skipExists));
-            // 完整清单只写日志文件（弹窗不罗列，避免长列表挤掉结论文字）
-            for (int i = 0; i < files.Count; i++)
-            {
-                string dst;
-                try { dst = OutputPlanner.FinalPath(files[i], mode); }
-                catch { dst = "(无法计算)"; }
-                Log.Info(string.Format(CultureInfo.InvariantCulture,
-                    "  [{0}/{1}] {2}  ->  {3}", i + 1, files.Count, files[i], dst));
-            }
+            // 不在开头罗列完整队列：执行期每个文件都会带完整路径记录一次，
+            // 开头再列一遍会让同一批文件出现两次、且打断"任务与结果一一对应"的阅读顺序。
             AppendMuted("日志文件：" + Log.FilePath);
             AppendLog("输出方式：" + modeLabel);
 
@@ -886,8 +929,10 @@ namespace FixVideoTimeLine
                     // 覆盖模式：finalPath 即源文件本身，ffmpeg 实际写 temp 下的临时工作文件，成功后再替换
                     string workFile = OutputPlanner.WorkingPath(file, mode);
 
-                    Log.Step(string.Format(CultureInfo.InvariantCulture, "{0} 处理：{1}", tag, file));
-                    AppendSeparator(string.Format(CultureInfo.InvariantCulture, "──── {0} {1} ────", tag, name));
+                    // ──── 紧凑块：每个文件的信息只出现一次，形成「任务 ↔ 结果」一一对应 ────
+                    // ① 块首：序号 + 文件名（屏幕与日志都只在这一行出现文件名）
+                    Log.Step(DialogText.BlockHead(idx + 1, files.Count, file));
+                    AppendSeparator(DialogText.BlockHead(idx + 1, files.Count, file));
 
                     // 非覆盖模式下工作文件不应等于源文件（genpts 子目录 / 主名加 _genpts），保险再拦一次
                     if (!overwrite && string.Equals(workFile, file, StringComparison.OrdinalIgnoreCase))
@@ -901,7 +946,7 @@ namespace FixVideoTimeLine
                     }
                     if (skipExists && File.Exists(finalPath))
                     {
-                        Log.Warn("输出已存在，跳过：" + finalPath);
+                        Log.Warn("跳过：输出已存在 " + finalPath);
                         AppendSkip(string.Format(CultureInfo.InvariantCulture,
                             "{0} {1} 跳过：输出已存在", tag, name));
                         skipCount++;
@@ -920,7 +965,7 @@ namespace FixVideoTimeLine
                         {
                             string freeText = FormatSize(freeBytes);
                             Log.Warn(string.Format(CultureInfo.InvariantCulture,
-                                "{0} 磁盘空间不足，跳过：需要约 {1}，可用 {2}", tag, FormatSize(needBytes), freeText));
+                                "跳过：磁盘空间不足，需要约 {0}，可用 {1}", FormatSize(needBytes), freeText));
                             AppendSkip(string.Format(CultureInfo.InvariantCulture,
                                 "{0} {1} 跳过：磁盘空间不足（需要约 {2}，可用 {3}）",
                                 tag, name, FormatSize(needBytes), freeText));
@@ -929,18 +974,11 @@ namespace FixVideoTimeLine
                         }
                     }
 
-                    Log.Info("输入：" + file);
-                    if (overwrite)
-                    {
-                        Log.Info("临时输出：" + workFile);
-                        Log.Info("成功后替换：" + finalPath);
-                        AppendMuted("临时文件：" + workFile);
-                    }
-                    else
-                    {
-                        Log.Info("输出：" + finalPath);
-                        AppendMuted("输出：" + finalPath);
-                    }
+                    // ② 源路径 + 实际写入位置：源文件路径全日志只出现这一次
+                    Log.Info(DialogText.BlockSource(file));
+                    string targetLine = DialogText.BlockTarget(mode, workFile, finalPath);
+                    Log.Info(targetLine);
+                    AppendMuted(overwrite ? ("临时文件：" + workFile) : ("输出：" + finalPath));
 
                     int overall = (int)((long)idx * 100 / files.Count);
                     SetStatus(string.Format(CultureInfo.InvariantCulture, "修复中 {0}...", tag));
@@ -970,7 +1008,8 @@ namespace FixVideoTimeLine
                                     string.Format(CultureInfo.InvariantCulture, "当前：{0} ({1}%)", name, p));
                             }
                         },
-                        delegate(string m) { Log.Info("  " + m); AppendMuted("  " + m); },
+                        // 降级提示：文件日志已由 FixEngine 写 WARN，这里只补到界面上，避免同一句写两遍
+                        delegate(string m) { AppendMuted("  " + m); },
                         delegate { return _stopRequested; },
                         delegate(System.Diagnostics.Process p) { _currentProcess = p; });
 
@@ -985,7 +1024,6 @@ namespace FixVideoTimeLine
                             try
                             {
                                 OutputPlanner.Commit(file, workFile);
-                                Log.Ok("已用修复结果覆盖原文件：" + file);
                             }
                             catch (Exception cex)
                             {
@@ -1014,20 +1052,23 @@ namespace FixVideoTimeLine
                         try { _lastOutputDir = Path.GetDirectoryName(donePath); }
                         catch { _lastOutputDir = null; }
 
+                        // ③ 块尾：结果汇总与体积合并成一条；不再重复任何路径
+                        string tailInfo = DialogText.BlockDone(0, result.Seconds(), mb,
+                            result.ModeName(), result.Degraded);
                         if (result.Degraded)
                         {
                             degradedCount++;
-                            Log.Warn(string.Format(CultureInfo.InvariantCulture, "[成功·已降级] {0}（{1} MB）", donePath, mb));
+                            Log.Warn(tailInfo);
                             AppendDegraded(string.Format(CultureInfo.InvariantCulture,
-                                "{0} {1} 已降级完成（{2} MB）{3}",
-                                tag, name, mb, overwrite ? "，原文件已被替换" : ""));
+                                "{0} {1} 降级完成：{2}{3}",
+                                tag, name, tailInfo, overwrite ? "，源文件已被替换" : ""));
                         }
                         else
                         {
-                            Log.Ok(string.Format(CultureInfo.InvariantCulture, "[成功] {0}（{1} MB）", donePath, mb));
+                            Log.Ok(tailInfo);
                             AppendOk(string.Format(CultureInfo.InvariantCulture,
-                                "{0} {1} 修复完成（{2} MB）{3}",
-                                tag, name, mb, overwrite ? "，原文件已覆盖" : ""));
+                                "{0} {1} 修复完成：{2}{3}",
+                                tag, name, tailInfo, overwrite ? "，源文件已被替换" : ""));
                         }
                         okCount++;
                         SetProgress(100);
@@ -1035,7 +1076,7 @@ namespace FixVideoTimeLine
                     else if (result.ExitCode == FixEngine.StoppedExitCode)
                     {
                         if (overwrite) OutputPlanner.DiscardWorking(workFile, finalPath, mode);
-                        Log.Warn("当前文件处理被用户停止。");
+                        Log.Warn(DialogText.BlockStopped(result.Seconds()));
                         AppendStopped(string.Format(CultureInfo.InvariantCulture,
                             "{0} {1} 已停止：处理被中断，不计入失败，源文件未改动", tag, name));
                         SetProgress(0);
@@ -1046,9 +1087,8 @@ namespace FixVideoTimeLine
                         if (overwrite) OutputPlanner.DiscardWorking(workFile, finalPath, mode);
                         FailureKind kind = FailureClassifier.Classify(result.Lines, result.ExitCode);
                         string reason = FailureClassifier.Describe(kind);
-                        Log.Err(string.Format(CultureInfo.InvariantCulture,
-                            "[失败] 增强与基础模式均失败，退出码 {0}，原因：{1}（{2}）",
-                            result.ExitCode, reason, kind.ToString()));
+                        Log.Err(DialogText.BlockFailed(result.ExitCode, result.Seconds(),
+                            reason, kind.ToString()));
                         AppendFail(string.Format(CultureInfo.InvariantCulture,
                             "{0} {1} 修复失败：{2}（源文件未改动）", tag, name, reason));
 
@@ -1156,6 +1196,9 @@ namespace FixVideoTimeLine
             FailureKind[] order = FailureClassifier.AllKinds();
 
             // ---- LOG 文件：完整明细，按原因分组逐条列出 ----
+            // 说明：这是**唯一**允许重复列出源路径的地方，且只在文件末尾 ——
+            // 它是一份独立的「失败索引」，便于按原因反查；不会插入执行期的紧凑块序列，
+            // 因此不破坏「队列任务 ↔ 执行结果」一一对应的阅读顺序。
             Log.Err(string.Format(CultureInfo.InvariantCulture,
                 "===== 失败汇总：共 {0} 个文件 =====", failStats.Count));
             for (int i = 0; i < order.Length; i++)

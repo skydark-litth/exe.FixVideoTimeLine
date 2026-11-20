@@ -127,9 +127,7 @@ namespace FixVideoTimeLine
 
         private const uint FOS_PICKFOLDERS = 0x0020;
         private const uint FOS_FORCEFILESYSTEM = 0x0040;
-        private const uint FOS_ALLOWMULTISELECT = 0x0200;
         private const uint FOS_PATHMUSTEXIST = 0x0800;
-        private const uint FOS_FILEMUSTEXIST = 0x1000;
         private const uint SIGDN_FILESYSPATH = 0x80058000;
         private const int S_OK = 0;
         private static readonly Guid IID_IShellItem = new Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe");
@@ -159,21 +157,18 @@ namespace FixVideoTimeLine
             return p;
         }
 
-        private static COMDLG_FILTERSPEC[] ParseFilter(string filter)
-        {
-            if (string.IsNullOrEmpty(filter)) return null;
-            string[] parts = filter.Split('|');
-            int n = parts.Length / 2;
-            if (n <= 0) return null;
-            var arr = new COMDLG_FILTERSPEC[n];
-            for (int i = 0; i < n; i++)
-            {
-                arr[i] = new COMDLG_FILTERSPEC();
-                arr[i].pszName = parts[i * 2];
-                arr[i].pszSpec = parts[i * 2 + 1];
-            }
-            return arr;
-        }
+        // 说明：这里**曾经**有一个 PickFiles（多选文件）方法，已移除。
+        // 它走 dlg.GetResults + IEnumShellItems 逐条枚举，但与 PickFolder 的唯一差别就在这一步——
+        // PickFolder 用 GetResult 取单条，一直正常；PickFiles 用 GetResults 取枚举，
+        // 出现「选完文件后返回空、界面仍显示尚未选择」的问题。
+        // 排查记录：创建对话框、SetOptions、SetFileTypes、SetTitle、SetFolder、SetFileName
+        // 全部调用成功（无异常、无 vtable 错位），故失败点只能落在 GetResults 的枚举上。
+        // 由于该方法在异常时 catch{return null} 会完全静默，无法在无人值守环境复现点击，
+        // 改用 .NET Framework 自带的 OpenFileDialog（net48 上本就是现代样式、原生支持多选与筛选），
+        // 见 MainForm.OnPickFiles。文件夹选择仍走这里，因为 net48 的 FolderBrowserDialog 只能显示老式树状界面。
+        //
+        // 注意：下面两个接口的 GetResults / GetSelectedItems 槽位保留声明——
+        // IFileOpenDialog 的 vtable 必须完整，缺槽位会让调用落到错误位置。
 
         /// <summary>选择文件夹（现代样式）。返回 null 表示用户取消。</summary>
         public static string PickFolder(string title, string initial, IntPtr owner)
@@ -192,49 +187,6 @@ namespace FixVideoTimeLine
                 IShellItem res;
                 dlg.GetResult(out res);
                 return PathOf(res);
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        /// <summary>选择文件（可多选，现代样式）。返回 null 表示用户取消。</summary>
-        public static string[] PickFiles(string title, string filter, string initial, IntPtr owner)
-        {
-            try
-            {
-                IFileOpenDialog dlg = Create();
-                uint opts;
-                dlg.GetOptions(out opts);
-                dlg.SetOptions(opts | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST
-                                    | FOS_FILEMUSTEXIST | FOS_ALLOWMULTISELECT);
-                COMDLG_FILTERSPEC[] spec = ParseFilter(filter);
-                if (spec != null) dlg.SetFileTypes((uint)spec.Length, spec);
-                ApplyStart(dlg, initial);
-                if (!string.IsNullOrEmpty(title)) dlg.SetTitle(title);
-                dlg.SetOkButtonLabel("选择文件");
-                int hr = dlg.Show(owner);
-                if (hr != S_OK) return null;
-
-                var list = new List<string>();
-                IEnumShellItems en;
-                dlg.GetResults(out en);
-                IntPtr one;
-                uint fetched;
-                while (en.Next(1, out one, out fetched) == S_OK && fetched == 1)
-                {
-                    try
-                    {
-                        IShellItem it = (IShellItem)Marshal.GetObjectForIUnknown(one);
-                        list.Add(PathOf(it));
-                        Marshal.ReleaseComObject(it);
-                    }
-                    catch { }
-                    finally { Marshal.Release(one); }
-                }
-                if (list.Count == 0) return null;
-                return list.ToArray();
             }
             catch
             {

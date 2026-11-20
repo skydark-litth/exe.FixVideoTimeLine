@@ -163,5 +163,80 @@ namespace FixVideoTimeLine
             }
             return lines.ToArray();
         }
+
+        // ---------------- 每个文件的「紧凑块」文案 ----------------
+        //
+        // 设计目标（用户明确要求）：日志必须让「队列里的任务」与「执行结果」一一对应，
+        // 同一个文件的信息不得在日志里反复出现。因此把每个文件的记录组织成一个块：
+        //
+        //   ──── [1/38] 1幼音 (1).mp4 ────     ← ① 块首：序号 + 文件名
+        //   源文件：X:\...\1幼音 (1).mp4        ← ② 源路径（全日志仅此一处出现完整源路径）
+        //   临时输出：X:\...\temp\<md5>.mp4     ← ③ 实际写入位置（覆盖模式）/ 输出：<路径>
+        //   [FF] ...（ffmpeg 原始输出，仅日志文件）← ④
+        //   完成：退出码 0，用时 0.2 秒，45.3 MB，增强模式  ← ⑤ 块尾：结果汇总，不再重复路径
+        //
+        // 这五个方法的输出共同保证：对任一文件 f，整份日志里 f 的完整路径出现次数恰好为 1。
+        //
+        // 唯一例外：文件末尾的「失败汇总」会按原因再次列出失败文件的完整路径。
+        // 它是独立于执行序列的「失败索引」，位于所有块之后，不影响块序列的对应关系。
+
+        /// <summary>块首：序号 + 文件名（只有这一行出现文件名）。</summary>
+        public static string BlockHead(int index, int total, string file)
+        {
+            string name = file;
+            try { name = Path.GetFileName(file); } catch { }
+            return string.Format(CultureInfo.InvariantCulture, "──── [{0}/{1}] {2} ────", index, total, name);
+        }
+
+        /// <summary>块内第 2 行：完整源路径（整份日志中源路径唯一出现的位置）。</summary>
+        public static string BlockSource(string file)
+        {
+            return "源文件：" + file;
+        }
+
+        /// <summary>块内第 3 行：实际写入位置。覆盖模式写临时文件（源文件路径上文已给，不重复），
+        /// 其余模式直接写最终输出路径。</summary>
+        public static string BlockTarget(OutputMode mode, string workFile, string finalPath)
+        {
+            return mode == OutputMode.Overwrite ? ("临时输出：" + workFile) : ("输出：" + finalPath);
+        }
+
+        /// <summary>块尾：结果汇总（退出码 / 用时 / 体积 / 最终模式），不再重复任何路径。</summary>
+        public static string BlockDone(int exitCode, double seconds, double mb, string modeName, bool degraded)
+        {
+            return string.Format(CultureInfo.InvariantCulture,
+                "完成：退出码 {0}，用时 {1:N1} 秒，{2} MB，{3}模式{4}",
+                exitCode, seconds, mb, modeName, degraded ? "（增强失败已降级）" : "");
+        }
+
+        /// <summary>块尾（用户停止）。</summary>
+        public static string BlockStopped(double seconds)
+        {
+            return string.Format(CultureInfo.InvariantCulture,
+                "结果：被用户停止（用时 {0:N1} 秒），不计入失败，源文件未改动", seconds);
+        }
+
+        /// <summary>块尾（失败）：退出码 + 用时 + 原因，不再重复路径。</summary>
+        public static string BlockFailed(int exitCode, double seconds, string reason, string kindName)
+        {
+            return string.Format(CultureInfo.InvariantCulture,
+                "结果：失败（增强与基础模式均失败，退出码 {0}，用时 {1:N1} 秒，原因：{2} / {3}）",
+                exitCode, seconds, reason, kindName);
+        }
+
+        /// <summary>测试/审计用：统计子串出现次数（大小写不敏感）。</summary>
+        public static int CountOccurrences(string haystack, string needle)
+        {
+            if (string.IsNullOrEmpty(haystack) || string.IsNullOrEmpty(needle)) return 0;
+            int n = 0, i = 0;
+            while (true)
+            {
+                int k = haystack.IndexOf(needle, i, StringComparison.OrdinalIgnoreCase);
+                if (k < 0) break;
+                n++;
+                i = k + needle.Length;
+            }
+            return n;
+        }
     }
 }

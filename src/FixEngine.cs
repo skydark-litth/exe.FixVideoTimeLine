@@ -17,6 +17,20 @@ namespace FixVideoTimeLine
         public string FailedMode;    // 降级前失败的模式
         public List<string> Lines = new List<string>();
         public List<Attempt> Attempts = new List<Attempt>();
+
+        /// <summary>本次修复实际耗时（各次尝试合计，单位秒）。</summary>
+        public double Seconds()
+        {
+            double t = 0;
+            for (int i = 0; i < Attempts.Count; i++) t += Attempts[i].Seconds;
+            return t;
+        }
+
+        /// <summary>最终结果的模式名（增强 / 基础）。</summary>
+        public string ModeName()
+        {
+            return FixEngine.ModeName(Mode);
+        }
     }
 
     internal class Attempt
@@ -121,16 +135,23 @@ namespace FixVideoTimeLine
 
                 if (isFallback)
                 {
-                    Log.Warn("增强模式失败，自动降级为基础模式重试同一个文件...");
-                    if (onMode != null) onMode("增强模式失败，自动降级为基础模式重试");
-                }
-                else
-                {
-                    Log.Step(string.Format(CultureInfo.InvariantCulture,
-                        "开始修复（{0} 模式）：{1}", ModeName(mode), input));
+                    // 把上一次（增强）尝试的退出码与用时并入降级提示，避免再单独写一条「尝试失败」
+                    double prevSec = 0;
+                    int prevExit = 0;
+                    if (result.Attempts.Count > 0)
+                    {
+                        Attempt pa = result.Attempts[result.Attempts.Count - 1];
+                        prevExit = pa.ExitCode;
+                        prevSec = pa.Seconds;
+                    }
+                    Log.Warn(string.Format(CultureInfo.InvariantCulture,
+                        "降级：{0} 模式失败（退出码 {1}，用时 {2:N1} 秒），改用 {3} 模式重试同一个文件",
+                        ModeName(modes[0]), prevExit, prevSec, ModeName(mode)));
                     if (onMode != null) onMode(string.Format(CultureInfo.InvariantCulture,
-                        "修复模式：{0}", ModeName(mode)));
+                        "增强模式失败，自动降级为{0}模式重试", ModeName(mode)));
                 }
+                // 不再单独写「开始修复（X 模式）：<路径>」——该路径由调用方（MainForm）在
+                // 每个文件的紧凑块头部写一次，这里再写一次会让同一路径重复出现、破坏对应关系。
 
                 var attempt = new Attempt();
                 attempt.Mode = mode;
@@ -157,9 +178,6 @@ namespace FixVideoTimeLine
                 }
 
                 bool hasOut = File.Exists(output);
-                Log.Info(string.Format(CultureInfo.InvariantCulture,
-                    "{0} 模式结束：退出码 {1}，用时 {2:N1} 秒，输出文件{3}",
-                    ModeName(mode), exit, sw.Elapsed.TotalSeconds, hasOut ? "已生成" : "不存在"));
 
                 var r = new FixResult();
                 r.ExitCode = exit;
@@ -169,20 +187,18 @@ namespace FixVideoTimeLine
 
                 if (exit == 0 && hasOut)
                 {
+                    // 成功不由本方法写日志：退出码/用时/体积由调用方合并成一条「完成：…」，
+                    // 保证同一文件的结果只出现一次（避免路径与信息重复）。
                     if (isFallback)
                     {
-                        Log.Ok("降级为基础模式后修复成功。");
                         r.Degraded = true;
                         r.FailedMode = modes[0];
                     }
                     return r;
                 }
 
-                if (!isFallback)
-                {
-                    Log.Warn(string.Format(CultureInfo.InvariantCulture,
-                        "增强模式失败（退出码 {0}），准备降级重试。", exit));
-                }
+                // 本条尝试失败：不单独写日志。若还有下一轮，由下一轮开头的「降级：…」带上
+                // 退出码与用时；若没有下一轮，由调用方（MainForm）统一写「结果：失败（…）」。
                 last = r;
             }
 
